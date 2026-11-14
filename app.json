@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "Smart Water & Energy Station",
+    "slug": "smart-water-energy-station",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#080F1C"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#080F1C"
+      }
+    },
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}
