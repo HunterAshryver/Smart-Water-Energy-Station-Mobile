@@ -14,6 +14,25 @@ import { Atuador, ConsumoEletrico, Falha, Nivel, Vazao } from '../types';
 
 type Secao = 'niveis' | 'vazoes' | 'consumo' | 'atuadores' | 'falhas';
 
+type RegistroComData = { id?: number; dataHora?: string };
+
+function ordenarMaisRecentes<T extends RegistroComData>(registros: T[]): T[] {
+  return [...registros].sort((a, b) => {
+    const dataA = a.dataHora ? new Date(a.dataHora).getTime() : 0;
+    const dataB = b.dataHora ? new Date(b.dataHora).getTime() : 0;
+    return dataB - dataA || (b.id ?? 0) - (a.id ?? 0);
+  });
+}
+
+const aleatorio = (minimo: number, maximo: number) =>
+  minimo + Math.random() * (maximo - minimo);
+
+const limitar = (valor: number, minimo: number, maximo: number) =>
+  Math.max(minimo, Math.min(maximo, valor));
+
+const arredondar = (valor: number, casas = 2) =>
+  Number(valor.toFixed(casas));
+
 const formatarData = (value?: string) => {
   if (!value) return 'Data não informada';
   const date = new Date(value);
@@ -53,8 +72,11 @@ export default function DashboardScreen() {
   const [erro, setErro] = useState('');
   const [secao, setSecao] = useState<Secao>('niveis');
   const [atuadorEmAcao, setAtuadorEmAcao] = useState<number | null>(null);
+  const [simulando, setSimulando] = useState(false);
+  const [mensagemSimulacao, setMensagemSimulacao] = useState('');
+  const [statusSimulacao, setStatusSimulacao] = useState<'success' | 'warning' | ''>('');
 
-  const carregarDados = useCallback(async () => {
+  const carregarDados = useCallback(async (): Promise<boolean> => {
     setErro('');
     try {
       const [atuadoresRes, niveisRes, vazoesRes, consumosRes, falhasRes] = await Promise.all([
@@ -70,6 +92,7 @@ export default function DashboardScreen() {
       setVazoes(vazoesRes.data);
       setConsumos(consumosRes.data);
       setFalhas(falhasRes.data);
+      return true;
     } catch (error: any) {
       const status = error?.response?.status;
       setErro(
@@ -77,6 +100,7 @@ export default function DashboardScreen() {
           ? `A API respondeu com erro ${status}. Confira o backend e os endpoints.`
           : 'Não foi possível conectar ao backend. Confira se ele está iniciado e se a URL da API está correta.',
       );
+      return false;
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -100,14 +124,145 @@ export default function DashboardScreen() {
     () => falhas.filter((item) => !item.resolvido).length,
     [falhas],
   );
-  const mediaDosNiveis = useMemo(() => {
-    if (!niveis.length) return 0;
-    return Math.round(niveis.reduce((total, item) => total + percentualNivel(item), 0) / niveis.length);
+  // O endpoint /api/niveis guarda leituras históricas. Para os cards de nível,
+  // mostramos apenas a medição mais recente de cada reservatório.
+  const niveisMaisRecentes = useMemo(() => {
+    const porNome = new Map<string, Nivel>();
+    ordenarMaisRecentes(niveis).forEach((item) => {
+      const chave = item.nome.trim().toLocaleLowerCase();
+      if (!porNome.has(chave)) porNome.set(chave, item);
+    });
+    return [...porNome.values()];
   }, [niveis]);
+
+  const vazoesMaisRecentes = useMemo(
+    () => ordenarMaisRecentes(vazoes).slice(0, 12),
+    [vazoes],
+  );
+  const consumosMaisRecentes = useMemo(
+    () => ordenarMaisRecentes(consumos).slice(0, 12),
+    [consumos],
+  );
+
+  const mediaDosNiveis = useMemo(() => {
+    if (!niveisMaisRecentes.length) return 0;
+    return Math.round(
+      niveisMaisRecentes.reduce((total, item) => total + percentualNivel(item), 0) /
+        niveisMaisRecentes.length,
+    );
+  }, [niveisMaisRecentes]);
   const consumoTotal = useMemo(
     () => consumos.reduce((total, item) => total + (item.valorKwh || 0), 0),
     [consumos],
   );
+
+  const simularColetas = async () => {
+    if (simulando) return;
+
+    setSimulando(true);
+    setMensagemSimulacao('');
+    setStatusSimulacao('');
+
+    // Cada clique representa uma janela simulada de aproximadamente cinco minutos.
+    // Os valores variam suavemente a partir da última leitura salva no backend.
+    const tanquePrincipalAnterior = niveisMaisRecentes.find(
+      (item) => item.nome === 'Reservatório Principal',
+    );
+    const tanqueSecundarioAnterior = niveisMaisRecentes.find(
+      (item) => item.nome === 'Reservatório Secundário',
+    );
+    const vazaoEntradaAnterior = ordenarMaisRecentes(vazoes).find(
+      (item) => item.pontoMedicao === 'Entrada principal',
+    );
+    const vazaoSaidaAnterior = ordenarMaisRecentes(vazoes).find(
+      (item) => item.pontoMedicao === 'Saída da filtragem',
+    );
+
+    const fluxoEntrada = arredondar(
+      limitar(aleatorio((vazaoEntradaAnterior?.valor ?? 24) - 1.4, (vazaoEntradaAnterior?.valor ?? 24) + 1.4), 17, 31),
+    );
+    const fluxoSaida = arredondar(
+      limitar(aleatorio((vazaoSaidaAnterior?.valor ?? 21) - 1.2, (vazaoSaidaAnterior?.valor ?? 21) + 1.2), 15, 28),
+    );
+
+    const nivelPrincipalAnterior = tanquePrincipalAnterior?.nivelAtual ?? 7800;
+    const nivelSecundarioAnterior = tanqueSecundarioAnterior?.nivelAtual ?? 3250;
+    const nivelPrincipal = arredondar(
+      limitar(
+        nivelPrincipalAnterior + (fluxoEntrada - fluxoSaida) * 5 + aleatorio(-12, 12),
+        500,
+        9700,
+      ),
+    );
+    const nivelSecundario = arredondar(
+      limitar(nivelSecundarioAnterior + aleatorio(-32, 32), 300, 4800),
+    );
+
+    // Consumo por intervalo de coleta: bomba, filtragem e iluminação.
+    const consumoBomba = arredondar(0.045 + fluxoEntrada * 0.00085 + aleatorio(-0.004, 0.004), 4);
+    const consumoFiltragem = arredondar(0.012 + fluxoSaida * 0.00045 + aleatorio(-0.002, 0.002), 4);
+    const consumoIluminacao = arredondar(0.0045 + aleatorio(-0.001, 0.001), 4);
+
+    const requisicoes = [
+      api.post('/api/niveis', {
+        nome: 'Reservatório Principal',
+        capacidadeMaxima: 10000,
+        nivelAtual: nivelPrincipal,
+        unidade: 'L',
+        localizacao: 'Tanque de captação',
+      }),
+      api.post('/api/niveis', {
+        nome: 'Reservatório Secundário',
+        capacidadeMaxima: 5000,
+        nivelAtual: nivelSecundario,
+        unidade: 'L',
+        localizacao: 'Área de armazenamento',
+      }),
+      api.post('/api/vazoes', {
+        valor: fluxoEntrada,
+        unidade: 'L/min',
+        pontoMedicao: 'Entrada principal',
+      }),
+      api.post('/api/vazoes', {
+        valor: fluxoSaida,
+        unidade: 'L/min',
+        pontoMedicao: 'Saída da filtragem',
+      }),
+      api.post('/api/consumo', { valorKwh: consumoBomba, setor: 'Bombas' }),
+      api.post('/api/consumo', { valorKwh: consumoFiltragem, setor: 'Filtragem' }),
+      api.post('/api/consumo', { valorKwh: consumoIluminacao, setor: 'Iluminação' }),
+    ];
+
+    try {
+      const resultados = await Promise.allSettled(requisicoes);
+      const falhasNaColeta = resultados.filter((item) => item.status === 'rejected').length;
+      const leiturasSalvas = resultados.length - falhasNaColeta;
+      const painelAtualizado = await carregarDados();
+
+      if (falhasNaColeta === 0 && painelAtualizado) {
+        setStatusSimulacao('success');
+        setMensagemSimulacao(
+          'Coleta concluída: 2 níveis, 2 vazões e 3 medições elétricas foram salvos no banco de dados.',
+        );
+      } else if (falhasNaColeta === 0) {
+        setStatusSimulacao('warning');
+        setMensagemSimulacao(
+          'As 7 leituras foram enviadas, mas o painel não conseguiu atualizá-las. Verifique a conexão e atualize novamente.',
+        );
+      } else {
+        setStatusSimulacao('warning');
+        setMensagemSimulacao(
+          `${leiturasSalvas} de 7 leituras foram salvas. ${falhasNaColeta} falharam; confira o backend e tente novamente.`,
+        );
+      }
+    } catch (error) {
+      console.error('Erro ao simular coletas:', error);
+      setStatusSimulacao('warning');
+      setMensagemSimulacao('Não foi possível concluir a simulação. Confira se o backend está ativo.');
+    } finally {
+      setSimulando(false);
+    }
+  };
 
   const alternarAtuador = async (id?: number) => {
     if (id === undefined) return;
@@ -184,6 +339,40 @@ export default function DashboardScreen() {
           </View>
         </View>
 
+        <View style={styles.simulationPanel}>
+          <View style={styles.simulationTextBlock}>
+            <Text style={styles.simulationTitle}>Simulador de sensores</Text>
+            <Text style={styles.simulationDescription}>
+              Gera uma coleta de 5 minutos e registra 7 leituras no backend.
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={[styles.simulationButton, simulando && styles.simulationButtonDisabled]}
+            onPress={simularColetas}
+            disabled={simulando}
+            activeOpacity={0.82}
+          >
+            {simulando ? (
+              <ActivityIndicator size="small" color="#F0F9FF" />
+            ) : (
+              <Text style={styles.simulationButtonIcon}>▶</Text>
+            )}
+            <Text style={styles.simulationButtonText}>
+              {simulando ? 'Coletando...' : 'Simular coletas'}
+            </Text>
+          </TouchableOpacity>
+          {mensagemSimulacao ? (
+            <Text
+              style={[
+                styles.simulationMessage,
+                statusSimulacao === 'success' ? styles.simulationMessageSuccess : styles.simulationMessageWarning,
+              ]}
+            >
+              {mensagemSimulacao}
+            </Text>
+          ) : null}
+        </View>
+
         <View style={styles.sectionHeading}>
           <Text style={styles.sectionTitle}>Dados da estação</Text>
           <Text style={styles.sectionHint}>Puxe para baixo para atualizar</Text>
@@ -209,7 +398,7 @@ export default function DashboardScreen() {
 
         {secao === 'niveis' && (
           <View>
-            {niveis.length === 0 ? <CartaoVazio mensagem="Nenhum nível cadastrado." /> : niveis.map((item) => {
+            {niveisMaisRecentes.length === 0 ? <CartaoVazio mensagem="Nenhum nível cadastrado." /> : niveisMaisRecentes.map((item) => {
               const pct = percentualNivel(item);
               const barColor = pct < 20 ? '#F87171' : pct < 50 ? '#FBBF24' : '#2DD4BF';
               return (
@@ -232,7 +421,7 @@ export default function DashboardScreen() {
 
         {secao === 'vazoes' && (
           <View>
-            {vazoes.length === 0 ? <CartaoVazio mensagem="Nenhuma medição de vazão cadastrada." /> : vazoes.map((item) => (
+            {vazoes.length === 0 ? <CartaoVazio mensagem="Nenhuma medição de vazão cadastrada." /> : vazoesMaisRecentes.map((item) => (
               <View style={styles.dataCard} key={item.id}>
                 <Text style={styles.cardTitle}>{item.pontoMedicao}</Text>
                 <Text style={styles.metricValue}>{Number(item.valor).toFixed(2)} <Text style={styles.metricUnit}>{item.unidade}</Text></Text>
@@ -244,7 +433,7 @@ export default function DashboardScreen() {
 
         {secao === 'consumo' && (
           <View>
-            {consumos.length === 0 ? <CartaoVazio mensagem="Nenhum registro de consumo elétrico cadastrado." /> : consumos.map((item) => (
+            {consumos.length === 0 ? <CartaoVazio mensagem="Nenhum registro de consumo elétrico cadastrado." /> : consumosMaisRecentes.map((item) => (
               <View style={styles.dataCard} key={item.id}>
                 <Text style={styles.cardTitle}>{item.setor}</Text>
                 <Text style={styles.metricValue}>{Number(item.valorKwh).toFixed(2)} <Text style={styles.metricUnit}>kWh</Text></Text>
@@ -336,6 +525,17 @@ const styles = StyleSheet.create({
   statOrange: { borderColor: '#9A3412' },
   statValue: { color: '#F8FAFC', fontSize: 23, fontWeight: '900' },
   statLabel: { color: '#94A3B8', fontSize: 10, marginTop: 6, fontWeight: '700' },
+  simulationPanel: { marginHorizontal: 16, marginTop: 16, padding: 14, borderRadius: 13, backgroundColor: '#0D2135', borderWidth: 1, borderColor: '#164E70' },
+  simulationTextBlock: { marginBottom: 12 },
+  simulationTitle: { color: '#E0F2FE', fontSize: 13, fontWeight: '900' },
+  simulationDescription: { color: '#8FAFC6', fontSize: 10, lineHeight: 15, marginTop: 4 },
+  simulationButton: { minHeight: 43, borderRadius: 9, backgroundColor: '#0369A1', paddingHorizontal: 14, paddingVertical: 10, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  simulationButtonDisabled: { opacity: 0.6 },
+  simulationButtonIcon: { color: '#F0F9FF', fontSize: 11, fontWeight: '900' },
+  simulationButtonText: { color: '#F0F9FF', fontSize: 12, fontWeight: '900' },
+  simulationMessage: { fontSize: 10, lineHeight: 15, marginTop: 10 },
+  simulationMessageSuccess: { color: '#5EEAD4' },
+  simulationMessageWarning: { color: '#FCD34D' },
   sectionHeading: { marginTop: 25, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between' },
   sectionTitle: { color: '#F1F5F9', fontSize: 17, fontWeight: '800' },
   sectionHint: { color: '#64748B', fontSize: 10 },
